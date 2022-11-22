@@ -1,0 +1,15 @@
+doc
+extras
+ia32
+intel64
+licensing
+source
+pin
+*.log
+README_old
+*.sig
+.vscode
+workspace/.cache
+workspace/obj-intel64
+*.tmpl
+*.png
