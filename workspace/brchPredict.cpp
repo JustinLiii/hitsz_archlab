@@ -1,9 +1,13 @@
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
 #include <iostream>
 #include <fstream>
 #include <cassert>
 #include <stdarg.h>
 #include <cstdlib>
 #include <cstring>
+#include <types.h>
 #include "pin.H"
 
 using namespace std;
@@ -18,15 +22,15 @@ typedef unsigned __int128   UINT128;
 
 ofstream OutFile;
 
-// ½«val½Ø¶Ï, Ê¹Æä¿í¶È±ä³Ébits
-#define truncate(val, bits) ((val) & ((1 << (bits)) - 1))
+// å°†valæˆªæ–­, ä½¿å…¶å®½åº¦å˜æˆbits
+#define truncate(val, bits) (((UINT128)val) & (((UINT128)1 << ((UINT128)bits)) - (UINT128)1))
 
 static UINT64 takenCorrect = 0;
 static UINT64 takenIncorrect = 0;
 static UINT64 notTakenCorrect = 0;
 static UINT64 notTakenIncorrect = 0;
 
-// ±¥ºÍ¼ÆÊıÆ÷ (N < 64)
+// é¥±å’Œè®¡æ•°å™¨ (N < 64)
 class SaturatingCnt
 {
     size_t m_wid;
@@ -49,7 +53,7 @@ class SaturatingCnt
         bool isTaken() { return (m_val > (1 << m_wid)/2 - 1); }
 };
 
-// ÒÆÎ»¼Ä´æÆ÷ (N < 128)
+// ç§»ä½å¯„å­˜å™¨ (N < 128)
 class ShiftReg
 {
     size_t m_wid;
@@ -63,7 +67,7 @@ class ShiftReg
             bool ret = !!(m_val & (1 << (m_wid - 1)));
             m_val <<= 1;
             m_val |= b;
-            m_val &= (1 << m_wid) - 1;
+            if(m_wid < 128) m_val &= ((UINT128)1 << (UINT128)m_wid) - (UINT128)1;
             return ret;
         }
 
@@ -72,9 +76,8 @@ class ShiftReg
 
 // Hash functions
 inline UINT128 f_xor(UINT128 a, UINT128 b) { return a ^ b; }
-inline UINT128 f_xor1(UINT128 a, UINT128 b) { return ~a ^ ~b; }
-inline UINT128 f_xnor(UINT128 a, UINT128 b) { return ~(a ^ ~b); }
-
+// inline UINT128 f_xor1(UINT128 a, UINT128 b) { return a & b; }
+inline UINT128 f_xnor(UINT128 a, UINT128 b) { return a ^ b; }
 
 
 // Base class of all predictors
@@ -89,6 +92,29 @@ class BranchPredictor
 
 BranchPredictor* BP;
 
+template<UINT128 (*hash)(UINT128 addr, UINT128 history)>
+UINT128 fold(UINT128 a,int alen,UINT128 b, int blen, int flen)
+{
+    UINT128 ret = truncate(a,flen);
+    for (int i = flen; i+flen < alen; i += flen)
+    {
+        ret = hash(truncate(a >> i,flen),ret);
+    }
+
+    for (int i = 0; i+flen < blen; i += flen)
+    {
+        ret = hash(truncate(b >> i,flen),ret);
+    }
+    
+    // printf("a:%#llx, ",a);
+    // printf("alen:%d, ",alen);
+    // printf("b:%#llx, ",b);
+    // printf("blen:%d, ",blen);
+    // printf("fold:%#llx, ",ret);
+    // printf("len:%d\n",flen);
+    return ret;
+}
+
 
 
 /* ===================================================================== */
@@ -102,8 +128,8 @@ class BHTPredictor: public BranchPredictor
     
     public:
         // Constructor
-        // param:   entry_num_log:  BHTĞĞÊıµÄ¶ÔÊı
-        //          scnt_width:     ±¥ºÍ¼ÆÊıÆ÷µÄÎ»Êı, Ä¬ÈÏÖµÎª2
+        // param:   entry_num_log:  BHTè¡Œæ•°çš„å¯¹æ•°
+        //          scnt_width:     é¥±å’Œè®¡æ•°å™¨çš„ä½æ•°, é»˜è®¤å€¼ä¸º2
         BHTPredictor(size_t entry_num_log, size_t scnt_width = 2)
         {
             m_entries_log = entry_num_log;
@@ -124,68 +150,141 @@ class BHTPredictor: public BranchPredictor
 
         BOOL predict(ADDRINT addr)
         {
-            // TODO: Produce prediction according to BHT
+            //get hash
+            int tag = truncate(addr, m_entries_log);
+
+            return m_scnt[tag].isTaken();
         }
 
         void update(BOOL takenActually, BOOL takenPredicted, ADDRINT addr)
         {
             // TODO: Update BHT according to branch results and prediction
+
+            //get hash
+            int tag = truncate(addr, m_entries_log);
+
+            if(takenActually) {
+                (m_scnt[tag]).increase();
+            } else {
+                (m_scnt[tag]).decrease();
+            }
         }
 };
 
 /* ===================================================================== */
 /* Global-history-based branch predictor                                 */
 /* ===================================================================== */
-template<UINT128 (*hash)(UINT128 addr, UINT128 history)>
+template<UINT128 (*hash1)(UINT128 pc, UINT128 ghr), UINT128 (*hash2)(UINT128 pc, UINT128 ghr)>
 class GlobalHistoryPredictor: public BranchPredictor
 {
     ShiftReg* m_ghr;                   // GHR
-    SaturatingCnt* m_scnt;              // PHTÖĞµÄ·ÖÖ§ÀúÊ·×Ö¶Î
-    size_t m_entries_log;                   // PHTĞĞÊıµÄ¶ÔÊı
+    size_t m_ghr_size;
+    size_t m_tag_size;
+    SaturatingCnt* m_scnt;              // PHTä¸­çš„åˆ†æ”¯å†å²å­—æ®µ
+    size_t m_entries_log;                   // PHTè¡Œæ•°çš„å¯¹æ•°
     allocator<SaturatingCnt> m_alloc;
+    UINT128* m_tags;
     
     public:
         // Constructor
         // param:   ghr_width:      Width of GHR
-        //          entry_num_log:  PHT±íĞĞÊıµÄ¶ÔÊı
-        //          scnt_width:     ±¥ºÍ¼ÆÊıÆ÷µÄÎ»Êı, Ä¬ÈÏÖµÎª2
-        GlobalHistoryPredictor(size_t ghr_width, size_t entry_num_log, size_t scnt_width = 2)
+        //          entry_num_log:  PHTè¡¨è¡Œæ•°çš„å¯¹æ•°
+        //          scnt_width:     é¥±å’Œè®¡æ•°å™¨çš„ä½æ•°, é»˜è®¤å€¼ä¸º2
+        GlobalHistoryPredictor(size_t ghr_width, size_t entry_num_log,size_t tag_size ,size_t scnt_width = 2)
         {
-            // TODO:
+            m_ghr = new ShiftReg(ghr_width);
+            m_ghr_size = ghr_width;
+            m_tag_size = tag_size;
+            m_entries_log = entry_num_log;
+            m_tags = new UINT128[1 << entry_num_log];
+            memset(m_tags,0,sizeof(UINT128)*(1<<entry_num_log));
+
+            m_scnt = m_alloc.allocate(1 << entry_num_log);      // Allocate memory for BHT
+            for (int i = 0; i < (1 << entry_num_log); i++)
+                m_alloc.construct(m_scnt + i, scnt_width);      // Call constructor of SaturatingCnt
         }
 
         // Destructor
         ~GlobalHistoryPredictor()
         {
-            // TODO
+            for (int i = 0; i < (1 << m_entries_log); i++)
+                m_alloc.destroy(m_scnt + i);
+
+            m_alloc.deallocate(m_scnt, 1 << m_entries_log);
+            delete m_ghr;
+            delete[] m_tags;
         }
 
         // Only for TAGE: return a tag according to the specificed address
         UINT128 get_tag(ADDRINT addr)
         {
-            // TODO
+            return m_tags[getIdx(addr)];
         }
 
         // Only for TAGE: return GHR's value
         UINT128 get_ghr()
         {
-            // TODO
+            return m_ghr->getVal();
+        }
+
+        size_t get_ghr_size()
+        {
+            return m_ghr_size;
+        }
+
+        void shift_ghr(bool taken)
+        {
+            m_ghr->shiftIn(taken);
+        }
+
+        void updateTag(ADDRINT addr){
+            int idx = getIdx(addr);
+            UINT128 new_tag = gen_tag(addr);
+            m_tags[idx] = new_tag;
         }
 
         // Only for TAGE: reset a saturating counter to default value (which is weak taken)
         void reset_ctr(ADDRINT addr)
         {
-            // TODO
+            //int tag = truncate(hash(addr, m_ghr->getVal()),m_entries_log);
+            (m_scnt[getIdx(addr)]).reset();
         }
 
         bool predict(ADDRINT addr)
         {
-            // TODO: Produce prediction according to GHR and PHT
+            return (m_scnt[getIdx(addr)]).isTaken();
         }
 
         void update(bool takenActually, bool takenPredicted, ADDRINT addr)
         {
-            // TODO: Update GHR and PHT according to branch results and prediction
+            //update BHT
+            // int tag = truncate(hash(addr, m_ghr->getVal()),m_entries_log);
+            int idx = getIdx(addr);
+            // UINT128 new_tag = gen_tag(addr);
+            
+            if(takenActually) {
+                (m_scnt[idx]).increase();
+            } else {
+                (m_scnt[idx]).decrease();
+            }
+            
+            // m_tags[idx] = new_tag;
+
+            //update ghr
+            m_ghr->shiftIn(takenActually);
+
+            // printf("%d\n",(int)(m_ghr->getVal()));
+        }
+    
+        int getIdx(ADDRINT addr)
+        {
+            // return truncate(hash(addr,m_ghr->getVal()),m_entries_log);
+            return truncate(fold<hash1>(m_ghr->getVal(),m_ghr_size,addr,64,m_entries_log) ,m_entries_log);
+        }
+
+        UINT128 gen_tag(ADDRINT addr)
+        {
+            return truncate(fold<hash2>(m_ghr->getVal(),m_ghr_size,addr,64,m_tag_size) ,m_tag_size);
         }
 };
 
@@ -200,15 +299,40 @@ class TournamentPredictor: public BranchPredictor
     public:
         TournamentPredictor(BranchPredictor* BP0, BranchPredictor* BP1, size_t gshr_width = 2)
         {
-            // TODO
+            m_BPs[0] = BP0;
+            m_BPs[1] = BP1;
+            m_gshr = new SaturatingCnt(gshr_width);
         }
 
         ~TournamentPredictor()
         {
-            // TODO
+            delete m_BPs[0];
+            delete m_BPs[1];
+            delete m_gshr;
         }
 
-        // TODO
+        bool predict(ADDRINT addr)
+        {
+            if (m_gshr->isTaken()) {
+                return m_BPs[1]->predict(addr);
+            } else {
+                return m_BPs[0]->predict(addr);
+            }
+        };
+
+        void update(bool takenActually, bool takenPredicted, ADDRINT addr)
+        {
+            //update gshr
+            if (m_BPs[1]->predict(addr) == takenActually && m_BPs[0]->predict(addr) != takenActually) {
+                m_gshr->increase();
+            } else if (m_BPs[1]->predict(addr) != takenActually && m_BPs[0]->predict(addr) == takenActually) {
+                m_gshr->decrease();
+            }
+
+            //update sub BP
+            m_BPs[0]->update(takenActually, takenPredicted, addr);
+            m_BPs[1]->update(takenActually, takenPredicted, addr);
+        };
 };
 
 /* ===================================================================== */
@@ -217,13 +341,14 @@ class TournamentPredictor: public BranchPredictor
 template<UINT128 (*hash1)(UINT128 pc, UINT128 ghr), UINT128 (*hash2)(UINT128 pc, UINT128 ghr)>
 class TAGEPredictor: public BranchPredictor
 {
-    const size_t m_tnum;            // ×ÓÔ¤²âÆ÷¸öÊı (T[0 : m_tnum - 1])
-    const size_t m_entries_log;     // ×ÓÔ¤²âÆ÷T[1 : m_tnum - 1]µÄPHTĞĞÊıµÄ¶ÔÊı
-    BranchPredictor** m_T;          // ×ÓÔ¤²âÆ÷Ö¸ÕëÊı×é
-    bool* m_T_pred;                 // ÓÃÓÚ´æ´¢¸÷×ÓÔ¤²âµÄÔ¤²âÖµ
+    const size_t m_tnum;            // å­é¢„æµ‹å™¨ä¸ªæ•° (T[0 : m_tnum - 1])
+    const size_t m_entries_log;     // å­é¢„æµ‹å™¨T[1 : m_tnum - 1]çš„PHTè¡Œæ•°çš„å¯¹æ•°
+    BranchPredictor** m_T;          // å­é¢„æµ‹å™¨æŒ‡é’ˆæ•°ç»„
+    bool* m_T_pred;                 // ç”¨äºå­˜å‚¨å„å­é¢„æµ‹çš„é¢„æµ‹å€¼
     UINT8** m_useful;               // usefulness matrix
     int provider_indx;              // Provider's index of m_T
     int altpred_indx;               // Alternate provider's index of m_T
+    size_t m_tag_size;
 
     const size_t m_rst_period;      // Reset period of usefulness
     size_t m_rst_cnt;               // Reset counter
@@ -231,29 +356,29 @@ class TAGEPredictor: public BranchPredictor
     public:
         // Constructor
         // param:   tnum:               The number of sub-predictors
-        //          T0_entry_num_log:   ×ÓÔ¤²âÆ÷T0µÄBHTĞĞÊıµÄ¶ÔÊı
-        //          T1ghr_len:          ×ÓÔ¤²âÆ÷T1µÄGHRÎ»¿í
-        //          alpha:              ¸÷×ÓÔ¤²âÆ÷T[1 : m_tnum - 1]µÄGHR¼¸ºÎ±¶Êı¹ØÏµ
-        //          Tn_entry_num_log:   ¸÷×ÓÔ¤²âÆ÷T[1 : m_tnum - 1]µÄPHTĞĞÊıµÄ¶ÔÊı
+        //          T0_entry_num_log:   å­é¢„æµ‹å™¨T0çš„BHTè¡Œæ•°çš„å¯¹æ•°
+        //          T1ghr_len:          å­é¢„æµ‹å™¨T1çš„GHRä½å®½
+        //          alpha:              å„å­é¢„æµ‹å™¨T[1 : m_tnum - 1]çš„GHRå‡ ä½•å€æ•°å…³ç³»
+        //          Tn_entry_num_log:   å„å­é¢„æµ‹å™¨T[1 : m_tnum - 1]çš„PHTè¡Œæ•°çš„å¯¹æ•°
         //          scnt_width:         Width of saturating counter (3 by default)
         //          rst_period:         Reset period of usefulness
-        TAGEPredictor(size_t tnum, size_t T0_entry_num_log, size_t T1ghr_len, float alpha, size_t Tn_entry_num_log, size_t scnt_width = 3, size_t rst_period = 256*1024)
-        : m_tnum(tnum), m_entries_log(Tn_entry_num_log), m_rst_period(rst_period), m_rst_cnt(0)
+        TAGEPredictor(size_t tnum, size_t T0_entry_num_log, size_t T1ghr_len, float alpha, size_t Tn_entry_num_log, size_t tag_size,size_t scnt_width = 3, size_t rst_period = 256*1024)
+        : m_tnum(tnum), m_entries_log(Tn_entry_num_log),m_tag_size(tag_size), m_rst_period(rst_period),m_rst_cnt(0)
         {
             m_T = new BranchPredictor* [m_tnum];
             m_T_pred = new bool [m_tnum];
             m_useful = new UINT8* [m_tnum];
 
-            m_T[0] = new BHTPredictor(1 << T0_entry_num_log);
+            m_T[0] = new BHTPredictor(T0_entry_num_log);
 
             size_t ghr_size = T1ghr_len;
             for (size_t i = 1; i < m_tnum; i++)
             {
-                m_T[i] = new GlobalHistoryPredictor<hash1>(ghr_size, m_entries_log, scnt_width);
+                m_T[i] = new GlobalHistoryPredictor<hash1,hash2>(ghr_size, m_entries_log, m_tag_size,scnt_width);
                 ghr_size = (size_t)(ghr_size * alpha);
-
                 m_useful[i] = new UINT8 [1 << m_entries_log];
                 memset(m_useful[i], 0, sizeof(UINT8)*(1 << m_entries_log));
+                //memset(m_tags[i-1], 0, sizeof(UINT128)*(1 << m_entries_log));
             }
         }
 
@@ -269,19 +394,103 @@ class TAGEPredictor: public BranchPredictor
 
         bool predict(ADDRINT addr)
         {
-            // TODO
+            provider_indx = 0;
+            altpred_indx = 0;
+            
+            // from longest to shortest
+            for (int i = m_tnum - 1; i > 0; i--) {
+                UINT128 tag1 = ((GlobalHistoryPredictor<hash1,hash2>*)m_T[i])->get_tag(addr);
+                UINT128 tag2 = ((GlobalHistoryPredictor<hash1,hash2>*)m_T[i])->gen_tag(addr);
+                //UINT128 tag2 = hash1(addr,((GlobalHistoryPredictor<hash1>*)m_T[i])->get_ghr());
+                if (tag1 == tag2) {
+                    if (provider_indx == 0) provider_indx = i;
+                    else {
+                        altpred_indx = i;
+                        break;
+                    }
+                }
+            }
+            m_T_pred[provider_indx] = m_T[provider_indx]->predict(addr);
+            m_T_pred[altpred_indx] = m_T[altpred_indx]->predict(addr);
+            
+            
+            return m_T_pred[provider_indx];
         }
 
         void update(bool takenActually, bool takenPredicted, ADDRINT addr)
         {
-            // TODO: Update provider itself
+            // if(provider_indx != 0) 
+            // {
+            //     GlobalHistoryPredictor<hash1,hash2>* BPQ = (GlobalHistoryPredictor<hash1,hash2>*)m_T[provider_indx];
+            //     // UINT128 GHP = BPQ->get_ghr();
+            //     // printf("%llu\n",BPQ->get_ghr());
+            //     // UINT128 GHP = ((UINT128)1 << 127) - (UINT128)1;
+                
+            //     printf("Prov:%d, Alt:%d,prid %d, take %d,",provider_indx,altpred_indx,takenPredicted,takenActually);
+            //     printf(" ghr:%llu\n",BPQ->get_ghr());
+            // }
 
+
+            // printf("Take %d\n",takenActually);
             // TODO: Update usefulness
+            if(m_T_pred[provider_indx] != m_T_pred[altpred_indx]){
+                int idx = ((GlobalHistoryPredictor<hash1,hash2>*)m_T[provider_indx])->getIdx(addr);
 
-            // TODO: Reset usefulness periodically
+                if (takenPredicted == takenActually) {
+                    if(m_useful[provider_indx][idx] < 3) m_useful[provider_indx][idx]++;
+                } else {
+                    if(m_useful[provider_indx][idx] > 0) m_useful[provider_indx][idx]--;
+                }
+            }
+
+            
+
+            
+
+            // TODO: Update provider itself
+            // printf("Update %d\n",provider_indx);
+            m_T[provider_indx]-> update(takenActually, takenPredicted, addr);
+
+            for (int i = 1; i < m_tnum; i++) {
+                if(i == provider_indx) continue;
+                ((GlobalHistoryPredictor<hash1,hash2>*)m_T[i]) -> shift_ghr(takenActually);
+            }
+
 
             // TODO: Entry replacement
+            bool allocated = false;
+            if (takenPredicted != takenActually) {
+                for (size_t i = provider_indx+1; i<m_tnum; i++) {
+                    int idx = ((GlobalHistoryPredictor<hash1,hash2>*)m_T[i])->getIdx(addr);
+                    if(m_useful[i][idx] == 0){
+                        ((GlobalHistoryPredictor<hash1,hash2>*)m_T[i])->updateTag(addr);
+                        ((GlobalHistoryPredictor<hash1,hash2>*)m_T[i])->reset_ctr(addr);
+                        allocated = true;
+                        break;
+                    }
+                }
+                if (!allocated) {
+                    for (size_t i = provider_indx+1; i<m_tnum; i++) {
+                        int getIdx = ((GlobalHistoryPredictor<hash1,hash2>*)m_T[i])->getIdx(addr);
+                        if(m_useful[i][getIdx] != 0) m_useful[i][getIdx]--;
+                    }
+                }
+            }
+
+            
+
+            // TODO: Reset usefulness periodically
+            if(m_rst_cnt >= m_rst_period){
+                m_rst_cnt = 0;
+                for (size_t i = 1; i < m_tnum; i++){
+                    memset(m_useful[i], 0, sizeof(UINT8)*(1 << m_entries_log));
+                }
+            } else {
+                m_rst_cnt++;
+            }
         }
+
+        
 };
 
 
@@ -367,8 +576,11 @@ INT32 Usage()
 int main(int argc, char * argv[])
 {
     // TODO: New your Predictor below.
-    // BP = new BranchPredictor();
-
+    // BP = new BHTPredictor(14);
+    // BP = new GlobalHistoryPredictor<f_xor,f_xnor>(22,11,9);
+    // BP = new TournamentPredictor(new GlobalHistoryPredictor<f_xor>(13,13),new GlobalHistoryPredictor<f_xnor>(13,13));
+    BP = new TAGEPredictor<f_xor, f_xnor>(8, 14, 2, 2, 11,12);
+    
     // Initialize pin
     if (PIN_Init(argc, argv)) return Usage();
     

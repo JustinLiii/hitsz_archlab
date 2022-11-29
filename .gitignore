@@ -11,5 +11,12 @@ README_old
 .vscode
 workspace/.cache
 workspace/obj-intel64
+workspace/bzip2
+workspace/sjeng
+workspace/sphinx3
+workspace/wrf
 *.tmpl
 *.png
+*.o
+*.so
+*.txt
