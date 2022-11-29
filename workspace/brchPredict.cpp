@@ -349,6 +349,7 @@ class TAGEPredictor: public BranchPredictor
     int provider_indx;              // Provider's index of m_T
     int altpred_indx;               // Alternate provider's index of m_T
     size_t m_tag_size;
+    bool clear_high;
 
     const size_t m_rst_period;      // Reset period of usefulness
     size_t m_rst_cnt;               // Reset counter
@@ -372,6 +373,7 @@ class TAGEPredictor: public BranchPredictor
             m_T[0] = new BHTPredictor(T0_entry_num_log);
 
             size_t ghr_size = T1ghr_len;
+            clear_high = 1;
             for (size_t i = 1; i < m_tnum; i++)
             {
                 m_T[i] = new GlobalHistoryPredictor<hash1,hash2>(ghr_size, m_entries_log, m_tag_size,scnt_width);
@@ -443,20 +445,6 @@ class TAGEPredictor: public BranchPredictor
                 }
             }
 
-            
-
-            
-
-            // TODO: Update provider itself
-            // printf("Update %d\n",provider_indx);
-            m_T[provider_indx]-> update(takenActually, takenPredicted, addr);
-
-            for (int i = 1; i < m_tnum; i++) {
-                if(i == provider_indx) continue;
-                ((GlobalHistoryPredictor<hash1,hash2>*)m_T[i]) -> shift_ghr(takenActually);
-            }
-
-
             // TODO: Entry replacement
             bool allocated = false;
             if (takenPredicted != takenActually) {
@@ -480,13 +468,23 @@ class TAGEPredictor: public BranchPredictor
             
 
             // TODO: Reset usefulness periodically
-            if(m_rst_cnt >= m_rst_period){
+            m_rst_cnt++;
+            if (m_rst_cnt == m_rst_period)
+            {
                 m_rst_cnt = 0;
-                for (size_t i = 1; i < m_tnum; i++){
-                    memset(m_useful[i], 0, sizeof(UINT8)*(1 << m_entries_log));
-                }
-            } else {
-                m_rst_cnt++;
+                for (size_t i = 1; i < m_tnum; i++)
+                    for (int j = 0; j < (1 << m_entries_log); j++)
+                        m_useful[i][j] &= (clear_high ? 2 : 1);
+                clear_high = !clear_high;
+            }
+
+            // TODO: Update provider itself
+            // printf("Update %d\n",provider_indx);
+            m_T[provider_indx]-> update(takenActually, takenPredicted, addr);
+
+            for (int i = 1; i < m_tnum; i++) {
+                if(i == provider_indx) continue;
+                ((GlobalHistoryPredictor<hash1,hash2>*)m_T[i]) -> shift_ghr(takenActually);
             }
         }
 
