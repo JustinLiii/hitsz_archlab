@@ -1,11 +1,15 @@
 #include <cstdio>
 #include <cmath>
-#include <cstring>
+#include <cstdlib>
 #include <ctime>
+#include <functional>
+#include <iterator>
+#include <map>
+#include <type_traits>
 #include "pin.H"
 
 typedef unsigned int        UINT32;
-typedef unsigned long int   UINT64;
+//typedef unsigned long int   UINT64;
 
 
 #define PAGE_SIZE_LOG       12
@@ -13,7 +17,128 @@ typedef unsigned long int   UINT64;
 
 #define get_vir_page_no(virtual_addr)   (virtual_addr >> PAGE_SIZE_LOG)
 #define get_page_offset(addr)           (addr & ((1u << PAGE_SIZE_LOG) - 1))
-#define truncate(val, start, end) ((val >> start) & ((1u << (end-start+1)) - 1))
+#define truncate(val, start, end) ((val >> start) & (((UINT64)1 << (end-start+1)) - (UINT64)1))
+
+// template<typename T>
+// struct Node
+// {
+//     T data;
+//     struct Node* prev;
+//     struct Node* next;
+// };
+
+// template<typename T>
+// class HashQueue
+// {
+//     typedef struct Node<T> Element;
+// public:
+//     enum TravellerLocation
+//     {
+//         Begin,
+//         End
+//     };
+//     enum TravellerDir
+//     {
+//         Forward,
+//         Backward
+//     };
+//     Element* elementList;
+//     std::map<T,Element*> addr_map;
+//     Element* end;
+//     uint m_count;
+    
+//     HashQueue<T>()
+//         : elementList(NULL),end(NULL),m_count(0)
+//     {
+//     }
+
+//     ~HashQueue<T>()
+//     {
+//         Element* Current = elementList;
+//         Element* Next;
+//         while (Current != NULL) {
+//             Next = Current->next;
+//             delete Current;
+//             Current = Next;
+//         }
+//     }
+
+//     void push(T value)
+//     {
+//         if(end==NULL)
+//         {
+//             elementList = end = new Element();
+//             end->prev = NULL;
+//         }
+//         else 
+//         {
+//             end->next = new Element();
+//             end->next->prev = end;
+//             end = end->next;
+//         }
+//         end->data = value;
+//         end->next = NULL;
+//         m_count++;
+//         addr_map[value]=end;
+//     }
+
+//     T pop()
+//     {
+//         m_count--;
+//         addr_map.erase(elementList->data);
+
+//         elementList->next->prev = NULL;
+//         Element* ret = elementList;
+//         elementList = elementList->next;
+        
+//         T retVal = ret->data;
+//         delete ret;
+//         return retVal;
+//     }
+
+//     T peek()
+//     {
+//         return elementList->data;
+//     }
+
+//     void remove(T value)
+//     {
+//         Element* Node = addr_map[value];
+//         addr_map.erase(value);
+
+//         if (Node->prev != NULL)
+//         {
+//             Node->prev->next = Node->next;
+//         }
+//         if (Node->next != NULL)
+//         {
+//             Node->next->prev = Node->prev;
+//         }
+
+//         delete Node;
+//     }
+
+//     void toTail(T value)
+//     {
+//         remove(value);
+//         push(value);
+//     }
+
+//     bool has(T value)
+//     {
+//         return addr_map.find(value) == addr_map.end();
+//     }
+
+//     Node<T>* getQueue()
+//     {
+//         return  elementList;
+//     }
+
+//     Node<T>* getEnd()
+//     {
+//         return  end;
+//     }
+// };
 
 // Obtain physical page number according to a given virtual page number
 UINT32 get_phy_page_no(UINT32 virtual_page_no)
@@ -47,12 +172,12 @@ public:
     {
         m_valids = new bool[m_block_num];
         m_tags = new UINT32[m_block_num];
-        m_replace_q = new UINT32[m_block_num];
+        m_replace_q = new HashQueue<UINT32>();
 
         for (UINT i = 0; i < m_block_num; i++)
         {
             m_valids[i] = false;
-            m_replace_q[i] = i;
+            m_replace_q->push(i);
         }
     }
 
@@ -61,7 +186,7 @@ public:
     {
         delete[] m_valids;
         delete[] m_tags;
-        delete[] m_replace_q;
+        delete m_replace_q;
     }
 
     // Update the cache state whenever data is read
@@ -85,8 +210,8 @@ public:
     {
         float rdHitRate = 100 * (float)m_rd_hits/m_rd_reqs;
         float wrHitRate = 100 * (float)m_wr_hits/m_wr_reqs;
-        printf("\tread req: %lu,\thit: %lu,\thit rate: %.2f%%\n", m_rd_reqs, m_rd_hits, rdHitRate);
-        printf("\twrite req: %lu,\thit: %lu,\thit rate: %.2f%%\n", m_wr_reqs, m_wr_hits, wrHitRate);
+        printf("\tread req: %llu,\thit: %llu,\thit rate: %.2f%%\n", m_rd_reqs, m_rd_hits, rdHitRate);
+        printf("\twrite req: %llu,\thit: %llu,\thit rate: %.2f%%\n", m_wr_reqs, m_wr_hits, wrHitRate);
     }
 
 protected:
@@ -95,7 +220,8 @@ protected:
 
     bool* m_valids;
     UINT32* m_tags;
-    UINT32* m_replace_q;    // Cache块替换的候选队列
+    // UINT32* m_replace_q;    // Cache块替换的候选队列
+    HashQueue<UINT32>* m_replace_q;
 
     UINT64 m_rd_reqs;       // The number of read-requests
     UINT64 m_wr_reqs;       // The number of write-requests
@@ -103,7 +229,7 @@ protected:
     UINT64 m_wr_hits;       // The number of hit write-requests
 
     // Look up the cache to decide whether the access is hit or missed
-    virtual bool lookup(UINT32 mem_addr, UINT32& blk_id) = 0;
+    // virtual bool lookup(UINT32 mem_addr, UINT32& blk_id) = 0;
 
     // Access the cache: update m_replace_q if hit, otherwise replace a block and update m_replace_q
     virtual bool access(UINT32 mem_addr) = 0;
@@ -126,7 +252,13 @@ public:
     ~FullAssoCache() {}
 
 private:
-    UINT32 getTag(UINT32 addr) {
+    UINT32 choose_replace()
+    {
+        return m_replace_q->peek();
+    }
+
+    UINT32 getTag(UINT32 addr) 
+    {
         return truncate(addr, m_blksz_log, 31);
     }
 
@@ -134,12 +266,11 @@ private:
     bool lookup(UINT32 mem_addr, UINT32& blk_id)
     {
         UINT32 tag = getTag(mem_addr);
-
-        for(blk_id=0;blk_id < m_block_num; blk_id++){
-            if (m_tags[blk_id] == tag) {
-                return true;
-            }
+        for (blk_id = 0; blk_id < m_block_num; blk_id++)
+        {
+            if(m_tags[blk_id] == tag) return true;
         }
+
         return false;
     }
 
@@ -154,7 +285,7 @@ private:
         }
 
         // Get the to-be-replaced block id using m_replace_q
-        UINT32 bid_2be_replaced = m_replace_q[m_block_num-1];
+        UINT32 bid_2be_replaced = choose_replace();
 
         // Replace the cache block
         m_tags[bid_2be_replaced] = getTag(mem_addr);
@@ -166,14 +297,7 @@ private:
     // Update m_replace_q
     void updateReplaceQ(UINT32 blk_id)
     {
-        int loc;
-        for (loc = 0; loc < m_block_num; loc++) {
-            if (blk_id == m_replace_q[loc]){
-                break;
-            }
-        }
-        memcpy(&m_replace_q[1], &m_replace_q, sizeof(UINT32)*(loc));
-        m_replace_q[0] = blk_id;
+        m_replace_q->toTail(blk_id);
     }
 };
 
@@ -197,20 +321,36 @@ private:
     UINT32 m_setsz_log;
     UINT32 m_setsz;
 
-    UINT32 getTag(UINT32 addr) {
-        return truncate(addr, (m_blksz_log+m_setsz_log), 31);
+    UINT32 choose_replace(UINT32 addr)
+    {
+        UINT32 SetIdx = getSetIdx(addr);
+        Node<UINT32>* Current = m_replace_q->getQueue();
+        for(; Current != NULL; Current = Current->next)
+        {
+            if ((truncate(Current->data, m_setsz_log, 31)) == SetIdx) return Current->data;
+        }
+        return -1;
     }
-    UINT32 getSetIdx(UINT32 addr) {
-        return truncate(addr, m_blksz_log, (m_blksz_log+m_setsz_log-1));
+
+    UINT32 getSetIdx(UINT32 addr)
+    {
+        return truncate(addr, m_blksz_log, m_blksz_log+m_setsz_log-1);
+    }
+
+    UINT32 getTag(UINT32 addr) 
+    {
+        return truncate(addr, (m_blksz_log+m_setsz_log), 31);
     }
 
     // Look up the cache to decide whether the access is hit or missed
     bool lookup(UINT32 mem_addr, UINT32& blk_id)
     {
-        UINT32 setIdx = getSetIdx(mem_addr);
+        int begin = getSetIdx(mem_addr) << m_setsz_log;
         UINT32 tag = getTag(mem_addr);
-        for (blk_id = setIdx << m_setsz_log; blk_id < (setIdx+1) << m_setsz_log; blk_id++){
-            if(m_tags[blk_id] == tag) {
+        for (blk_id = begin; blk_id < begin + m_setsz; blk_id++)
+        {
+            if(m_tags[blk_id] == tag)
+            {
                 return true;
             }
         }
@@ -228,14 +368,7 @@ private:
         }
 
         // Get the to-be-replaced block id using m_replace_q
-        UINT32 setIdx = getSetIdx(mem_addr);
-        UINT32 bid_2be_replaced;
-        for(int i = m_block_num; i >= 0; i++){
-            if(m_replace_q[i] >> m_setsz_log == setIdx) {
-                bid_2be_replaced = m_replace_q[i];
-                break;
-            }
-        }
+        UINT32 bid_2be_replaced = choose_replace(mem_addr);
 
         // Replace the cache block
         m_tags[bid_2be_replaced] = getTag(mem_addr);
@@ -247,20 +380,12 @@ private:
     // Update m_replace_q
     void updateReplaceQ(UINT32 blk_id)
     {
-        int loc;
-        for (loc = 0; loc < m_block_num; loc++) {
-            if (blk_id == m_replace_q[loc]){
-                break;
-            }
-        }
-        memcpy(&m_replace_q[1], &m_replace_q, sizeof(UINT32)*(loc));
-        m_replace_q[0] = blk_id;
+        m_replace_q->toTail(blk_id);
     }
 };
 
 /**************************************
  * Set-Associative Cache Class (VIVT)
- * pin tool 得到的都是虚拟地址
 **************************************/
 class SetAssoCache_VIVT : public CacheModel
 {
@@ -280,20 +405,36 @@ private:
     UINT32 m_setsz;
 
     // Add your members
-    UINT32 getTag(UINT32 addr) {
-        return truncate(addr, (m_blksz_log+m_setsz_log), 31);
+    UINT32 choose_replace(UINT32 vaddr)
+    {
+        UINT32 SetIdx = getSetIdx(vaddr);
+        Node<UINT32>* Current = m_replace_q->getQueue();
+        for(; Current != NULL; Current = Current->next)
+        {
+            if ((truncate(Current->data, m_setsz_log, 31)) == SetIdx) return Current->data;
+        }
+        return -1;
     }
-    UINT32 getSetIdx(UINT32 addr) {
-        return truncate(addr, m_blksz_log, (m_blksz_log+m_setsz_log-1));
+
+    UINT32 getSetIdx(UINT32 vaddr)
+    {
+        return truncate(vaddr, m_blksz_log, m_blksz_log+m_setsz_log-1);
+    }
+
+    UINT32 getTag(UINT32 vaddr) 
+    {
+        return truncate(vaddr, (m_blksz_log+m_setsz_log), 31);
     }
 
     // Look up the cache to decide whether the access is hit or missed
-    bool lookup(UINT32 mem_addr, UINT32& blk_id)
+    bool lookup(UINT32 mem_vaddr, UINT32& blk_id)
     {
-        UINT32 setIdx = getSetIdx(mem_addr);
-        UINT32 tag = getTag(mem_addr);
-        for (blk_id = setIdx << m_setsz_log; blk_id < (setIdx+1) << m_setsz_log; blk_id++){
-            if(m_tags[blk_id] == tag) {
+        int begin = getSetIdx(mem_vaddr) << m_setsz_log;
+        UINT32 tag = getTag(mem_vaddr);
+        for (blk_id = begin; blk_id < begin + m_setsz; blk_id++)
+        {
+            if(m_tags[blk_id] == tag)
+            {
                 return true;
             }
         }
@@ -301,27 +442,20 @@ private:
     }
 
     // Access the cache: update m_replace_q if hit, otherwise replace a block and update m_replace_q
-    bool access(UINT32 mem_addr)
+    bool access(UINT32 mem_vaddr)
     {
         UINT32 blk_id;
-        if (lookup(mem_addr, blk_id))
+        if (lookup(mem_vaddr, blk_id))
         {
             updateReplaceQ(blk_id);     // Update m_replace_q
             return true;
         }
 
         // Get the to-be-replaced block id using m_replace_q
-        UINT32 setIdx = getSetIdx(mem_addr);
-        UINT32 bid_2be_replaced;
-        for(int i = m_block_num; i >= 0; i++){
-            if(m_replace_q[i] >> m_setsz_log == setIdx) {
-                bid_2be_replaced = m_replace_q[i];
-                break;
-            }
-        }
+        UINT32 bid_2be_replaced = choose_replace(mem_vaddr);
 
         // Replace the cache block
-        m_tags[bid_2be_replaced] = getTag(mem_addr);
+        m_tags[bid_2be_replaced] = getTag(mem_vaddr);
         updateReplaceQ(bid_2be_replaced);
 
         return false;
@@ -330,14 +464,7 @@ private:
     // Update m_replace_q
     void updateReplaceQ(UINT32 blk_id)
     {
-        int loc;
-        for (loc = 0; loc < m_block_num; loc++) {
-            if (blk_id == m_replace_q[loc]){
-                break;
-            }
-        }
-        memcpy(&m_replace_q[1], &m_replace_q, sizeof(UINT32)*(loc));
-        m_replace_q[0] = blk_id;
+        m_replace_q->toTail(blk_id);
     }
 };
 
@@ -362,20 +489,37 @@ private:
     UINT32 m_setsz;
 
     // Add your members
-    UINT32 getTag(UINT32 paddr) {
-        return truncate(paddr, (m_blksz_log+m_setsz_log), 31);
+        // Add your members
+    UINT32 choose_replace(UINT32 paddr)
+    {
+        UINT32 SetIdx = getSetIdx(paddr);
+        Node<UINT32>* Current = m_replace_q->getQueue();
+        for(; Current != NULL; Current = Current->next)
+        {
+            if ((truncate(Current->data, m_setsz_log, 31)) == SetIdx) return Current->data;
+        }
+        return -1;
     }
-    UINT32 getSetIdx(UINT32 paddr) {
-        return truncate(paddr, m_blksz_log, (m_blksz_log+m_setsz_log-1));
+
+    UINT32 getSetIdx(UINT32 paddr)
+    {
+        return truncate(paddr, m_blksz_log, m_blksz_log+m_setsz_log-1);
+    }
+
+    UINT32 getTag(UINT32 paddr) 
+    {
+        return truncate(paddr, (m_blksz_log+m_setsz_log), 31);
     }
 
     // Look up the cache to decide whether the access is hit or missed
     bool lookup(UINT32 mem_paddr, UINT32& blk_id)
     {
-        UINT32 setIdx = getSetIdx(mem_paddr);
+        int begin = getSetIdx(mem_paddr) << m_setsz_log;
         UINT32 tag = getTag(mem_paddr);
-        for (blk_id = setIdx << m_setsz_log; blk_id < (setIdx+1) << m_setsz_log; blk_id++){
-            if(m_tags[blk_id] == tag) {
+        for (blk_id = begin; blk_id < begin + m_setsz; blk_id++)
+        {
+            if(m_tags[blk_id] == tag)
+            {
                 return true;
             }
         }
@@ -385,8 +529,8 @@ private:
     // Access the cache: update m_replace_q if hit, otherwise replace a block and update m_replace_q
     bool access(UINT32 mem_vaddr)
     {
-        UINT32 blk_id;
         UINT32 mem_paddr = get_phy_addr(mem_vaddr);
+        UINT32 blk_id;
         if (lookup(mem_paddr, blk_id))
         {
             updateReplaceQ(blk_id);     // Update m_replace_q
@@ -394,14 +538,7 @@ private:
         }
 
         // Get the to-be-replaced block id using m_replace_q
-        UINT32 setIdx = getSetIdx(mem_paddr);
-        UINT32 bid_2be_replaced;
-        for(int i = m_block_num; i >= 0; i++){
-            if(m_replace_q[i] >> m_setsz_log == setIdx) {
-                bid_2be_replaced = m_replace_q[i];
-                break;
-            }
-        }
+        UINT32 bid_2be_replaced = choose_replace(mem_paddr);
 
         // Replace the cache block
         m_tags[bid_2be_replaced] = getTag(mem_paddr);
@@ -413,14 +550,7 @@ private:
     // Update m_replace_q
     void updateReplaceQ(UINT32 blk_id)
     {
-        int loc;
-        for (loc = 0; loc < m_block_num; loc++) {
-            if (blk_id == m_replace_q[loc]){
-                break;
-            }
-        }
-        memcpy(&m_replace_q[1], &m_replace_q, sizeof(UINT32)*(loc));
-        m_replace_q[0] = blk_id;
+        m_replace_q->toTail(blk_id);
     }
 };
 
@@ -445,22 +575,36 @@ private:
     UINT32 m_setsz;
 
     // Add your members
-    UINT32 getTag(UINT32 paddr) {
-        return truncate(paddr, (m_blksz_log+m_setsz_log), 31);
+    UINT32 choose_replace(UINT32 vaddr)
+    {
+        UINT32 SetIdx = getSetIdx(vaddr);
+        Node<UINT32>* Current = m_replace_q->getQueue();
+        for(; Current != NULL; Current = Current->next)
+        {
+            if ((truncate(Current->data, m_setsz_log, 31)) == SetIdx) return Current->data;
+        }
+        return -1;
     }
-    UINT32 getSetIdx(UINT32 vaddr) {
-        return truncate(vaddr, m_blksz_log, (m_blksz_log+m_setsz_log-1));
+
+    UINT32 getSetIdx(UINT32 vaddr)
+    {
+        return truncate(vaddr, m_blksz_log, m_blksz_log+m_setsz_log-1);
+    }
+
+    UINT32 getTag(UINT32 paddr) 
+    {
+        return truncate(paddr, (m_blksz_log+m_setsz_log), 31);
     }
 
     // Look up the cache to decide whether the access is hit or missed
-    bool lookup(UINT32 mem_vaddr, UINT32& blk_id)
+    bool lookup(UINT32 mem_paddr, UINT32 mem_vaddr, UINT32& blk_id)
     {
-        UINT32 setIdx = getSetIdx(mem_vaddr);
-        // Physical Tagged
-        UINT32 mem_paddr = get_phy_addr(mem_vaddr);
+        int begin = getSetIdx(mem_vaddr) << m_setsz_log;
         UINT32 tag = getTag(mem_paddr);
-        for (blk_id = setIdx << m_setsz_log; blk_id < (setIdx+1) << m_setsz_log; blk_id++){
-            if(m_tags[blk_id] == tag) {
+        for (blk_id = begin; blk_id < begin + m_setsz; blk_id++)
+        {
+            if(m_tags[blk_id] == tag)
+            {
                 return true;
             }
         }
@@ -470,23 +614,16 @@ private:
     // Access the cache: update m_replace_q if hit, otherwise replace a block and update m_replace_q
     bool access(UINT32 mem_vaddr)
     {
-        UINT32 blk_id;
         UINT32 mem_paddr = get_phy_addr(mem_vaddr);
-        if (lookup(mem_vaddr, blk_id))
+        UINT32 blk_id;
+        if (lookup(mem_paddr, mem_vaddr,blk_id))
         {
             updateReplaceQ(blk_id);     // Update m_replace_q
             return true;
         }
 
         // Get the to-be-replaced block id using m_replace_q
-        UINT32 setIdx = getSetIdx(mem_vaddr);
-        UINT32 bid_2be_replaced;
-        for(int i = m_block_num; i >= 0; i++){
-            if(m_replace_q[i] >> m_setsz_log == setIdx) {
-                bid_2be_replaced = m_replace_q[i];
-                break;
-            }
-        }
+        UINT32 bid_2be_replaced = choose_replace(mem_vaddr);
 
         // Replace the cache block
         m_tags[bid_2be_replaced] = getTag(mem_paddr);
@@ -498,14 +635,7 @@ private:
     // Update m_replace_q
     void updateReplaceQ(UINT32 blk_id)
     {
-        int loc;
-        for (loc = 0; loc < m_block_num; loc++) {
-            if (blk_id == m_replace_q[loc]){
-                break;
-            }
-        }
-        memcpy(&m_replace_q[1], &m_replace_q, sizeof(UINT32)*(loc));
-        m_replace_q[0] = blk_id;
+        m_replace_q->toTail(blk_id);
     }
 };
 
